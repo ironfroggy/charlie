@@ -1,9 +1,12 @@
 from configparser import ConfigParser
+import os
 import subprocess
 import threading
 from queue import Queue, Empty
 
 import PySimpleGUI as sg
+
+from charlie.tasks import Task
 
 
 # TODO: Allow configuring a task with environment variables and CWD
@@ -14,6 +17,8 @@ import PySimpleGUI as sg
 # TODO: Keep logs on disk
 # TODO: Add parameters configured by encoded script comments
 # TODO: Watch directory or files to trigger tasks
+# TODO: Separate UI and Logic for Charlie
+# TODO: Port to PySide/Qt maybe? More support/docs and flexibility than PySimpleGUI?
 
 
 class AsynchronousFileReader(threading.Thread):
@@ -41,9 +46,14 @@ class AsynchronousFileReader(threading.Thread):
         return not self.is_alive() and self._queue.empty()
 
 
-def run_process(command):
+def run_process(command, task=None):
     # Launch the command as subprocess.
-    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=os.path.expanduser(getattr(task, 'workdir')),
+    )
 
     # Launch the asynchronous readers of the process' stdout and stderr.
     stdout_queue = Queue()
@@ -62,30 +72,27 @@ cfg.read(".charlie.yaml")
 
 sg.theme('DarkAmber')   # Add a touch of color
 
-cmd_output = sg.Multiline(size=(120, 50), key='$OUTPUT', font="Consolas")
+cmd_output = sg.Multiline(size=(80, 25), key='$OUTPUT', font="Consolas")
 cmd_input = sg.InputText(key='$INPUT')
 
-scripts = []
-for section in cfg.sections():
-    if section.startswith('job.'):
-        if 'command' in cfg[section]:
-            scripts.append(cfg[section]['command'])
+tasks = Task.from_config(cfg)
 
 # All the stuff inside your window.
 layout = [
     [sg.Text('Some text on Row 1')],
-    [sg.Listbox(scripts, size=(60, 10), key='$SCRIPTS', enable_events=True)],
+    [sg.Listbox([t.name for t in tasks], size=(60, 10), key='$SCRIPTS', enable_events=True)],
     [sg.Text('Run ad-hoc command:'), cmd_input],
     [sg.Button('Ok'), sg.Button('Cancel')],
     [cmd_output],
 ]
 
 # Create the Window
-window = sg.Window('Charlie', layout)
+window = sg.Window('Charlie', layout, grab_anywhere=True)
 
 # Event Loop to process "events" and get the "values" of the inputs
 q_out: Queue = None
 q_err: Queue = None
+current_task: Task = None
 while True:
     event, values = window.read(5)
     if event == '__TIMEOUT__':
@@ -105,14 +112,17 @@ while True:
             continue
     elif event == sg.WIN_CLOSED or event == 'Cancel': # if user closes window or clicks cancel
         break
+    elif event == '$INPUT':
+        pass
     elif event == '$SCRIPTS':
-        cmd_input.update(values['$SCRIPTS'][0])
+        current_task = [t for t in tasks if t.name == values['$SCRIPTS'][0]][0]
+        cmd_input.update(current_task.get_shell_command())
         continue
     elif event == 'Ok':
         cmd = values['$INPUT']
         if cmd:
             cmd_output.update("")
-            q_out, q_err = run_process(cmd)
+            q_out, q_err = run_process(cmd, current_task)
     else:
         print((event, values))
 
